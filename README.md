@@ -13,8 +13,8 @@ General usage:
         -p,--patches   - patches catalog path REQUIRED
         -e,--extension - patches file extension, ".patch" by default OPTIONAL
 Example create:
-        ns_delta_patches create -s "C:\source_data" -t "C:\target_data" -p "C:\patches"
+        ms_delta create -s "C:\source_data" -t "C:\target_data" -p "C:\patches"
 
 Example apply:
-        ns_delta_patches apply -s "C:\source_data" -t "C:\applied_data_patches" -p "C:\patches"
+        ms_delta apply -s "C:\source_data" -t "C:\applied_data_patches" -p "C:\patches"
 ```

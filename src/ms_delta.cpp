@@ -72,9 +72,9 @@ void usage()
     "\t-p,--patches   - patches catalog path REQUIRED\n"
     "\t-e,--extension - patches file extension, \"" << DEFAULT_PATCH_EXTENSION << "\" by default OPTIONAL\n"
     "Example create:\n"
-    "\tns_delta_patches create -s \"C:\\source_data\" -t \"C:\\target_data\" -p \"C:\\patches\"\n\n"
+    "\tms_delta create -s \"C:\\source_data\" -t \"C:\\target_data\" -p \"C:\\patches\"\n\n"
     "Example apply:\n"
-    "\tns_delta_patches apply -s \"C:\\source_data\" -t \"C:\\applied_data_patches\" -p \"C:\\patches\"\n\n"
+    "\tms_delta apply -s \"C:\\source_data\" -t \"C:\\applied_data_patches\" -p \"C:\\patches\"\n\n"
     ;
 }
 
