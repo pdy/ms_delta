@@ -1,3 +1,27 @@
+/*
+*   MIT License
+*
+*   Copyright (c) 2026 Pawel Drzycimski
+*
+*   Permission is hereby granted, free of charge, to any person obtaining a copy
+*   of this software and associated documentation files (the "Software"), to deal
+*   in the Software without restriction, including without limitation the rights
+*   to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+*   copies of the Software, and to permit persons to whom the Software is
+*   furnished to do so, subject to the following conditions:
+*
+*   The above copyright notice and this permission notice shall be included in all
+*   copies or substantial portions of the Software.
+*
+*   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+*   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+*   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+*   AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+*   LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+*   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+*   SOFTWARE.
+*/
+
 #include <optional>
 #include <filesystem>
 #include <string>
@@ -19,7 +43,7 @@ struct Args
     Apply
   } cmd;
 
-  std::string source, target, patches;
+  std::string source, target, patches_folder, patch_file_extension;
 };
 
 struct StdStringClearGuard
@@ -34,6 +58,8 @@ struct StdStringClearGuard
 
 namespace {
 
+static constexpr std::string_view DEFAULT_PATCH_EXTENSION = ".patch";
+
 void usage()
 {
   std::cout << 
@@ -41,20 +67,33 @@ void usage()
     "\nGeneral usage:\n"
     "\tns_delta_patches <command> -s <source> -t <target> -p <patches>\n\n"
     "\t<command> - create/apply\n"
-    "\t-s        - source catalog path REQUIRED\n"
-    "\t-t        - target catalog path REQUIRED\n"
-    "\t-p        - patches catalog path REQUIRED\n\n"
+    "\t-s,--source    - source catalog path REQUIRED\n"
+    "\t-t,--target    - target catalog path REQUIRED\n"
+    "\t-p,--patches   - patches catalog path REQUIRED\n"
+    "\t-e,--extension - patches file extension, \"" << DEFAULT_PATCH_EXTENSION << "\" by default OPTIONAL\n"
     "Example create:\n"
     "\tns_delta_patches create -s \"C:\\source_data\" -t \"C:\\target_data\" -p \"C:\\patches\"\n\n"
     "Example apply:\n"
-    "\tns_delta_patches apply -s \"C:\\target_data\" -t \"C:\\applied_data_patches\" -p \"C:\\patches\"\n\n"
+    "\tns_delta_patches apply -s \"C:\\source_data\" -t \"C:\\applied_data_patches\" -p \"C:\\patches\"\n\n"
     ;
+}
+
+template<typename ...Args>
+bool one_of(std::string_view str, Args&& ...args)
+{
+  for(const auto &arg : { std::forward<Args>(args)... }) {
+    if(str == arg)
+      return true;
+  }
+
+  return false;
 }
 
 std::optional<Args> process_args(int argc, char *argv[])
 {
-  if(argc < 2)
+  if(argc < 2) {
     return std::nullopt;
+  }
 
   Args ret;
   const std::string_view cmd{ argv[1] };
@@ -63,18 +102,20 @@ std::optional<Args> process_args(int argc, char *argv[])
   else if(cmd == "apply")
     ret.cmd = Args::Command::Apply;
   else {
-    std::cout << "Invalid command provided [" << cmd <<"] available - create/apply\n";
+    std::cout << "Invalid command provided [" << cmd << "] available - create/apply\n";
     return std::nullopt;
   }
 
   for(size_t i = 2; i < static_cast<size_t>(argc); ++i) {
     const std::string_view arg{ argv[i] };
-    if(arg == "-s")
+    if(one_of(arg, "-s", "--source") && i + 1 < argc)
       ret.source = argv[++i];
-    else if(arg == "-t")
+    else if(one_of(arg, "-t", "--target") && i + 1 < argc)
       ret.target = argv[++i];
-    else if(arg == "-p")
-      ret.patches = argv[++i];
+    else if(one_of(arg, "-p", "--patches") && i + 1 < argc)
+      ret.patches_folder = argv[++i];
+    else if(one_of(arg, "-e", "--extension") && i + 1 < argc)
+      ret.patch_file_extension = argv[++i];
   }
 
   bool ok = true;
@@ -88,10 +129,17 @@ std::optional<Args> process_args(int argc, char *argv[])
     ok = false;
   }
 
-  if(ret.patches.empty()) {
+  if(ret.patches_folder.empty()) {
     std::cout << "Missing -p argument\n";
     ok = false;
   }
+
+  if(ret.patch_file_extension.empty())
+    ret.patch_file_extension = DEFAULT_PATCH_EXTENSION;
+  else if(!ret.patch_file_extension.starts_with('.'))
+    ret.patch_file_extension = std::format(".{}", ret.patch_file_extension);
+
+  std::cout << "source: [" << ret.source << "] target: [" << ret.target << "] patches: " << ret.patches_folder << " extension: [" << ret.patch_file_extension << "]\n";
 
   if(!ok)
     return std::nullopt;
@@ -128,7 +176,7 @@ std::string Win32ErrStr(unsigned long errCode)
   return sysMsg;
 }
 
-std::vector<fs::path> list_files(std::string_view path)
+std::vector<fs::path> list_files(std::string_view path, std::string_view extension = "")
 {
   std::error_code ec;
   if(!fs::is_directory(path, ec))
@@ -136,9 +184,20 @@ std::vector<fs::path> list_files(std::string_view path)
 
   std::vector<fs::path> ret;
   ret.reserve(10);
-  for(const auto &entry : fs::directory_iterator(path)) {
-    if(entry.is_regular_file(ec))
-      ret.push_back(entry.path());
+  if(extension.empty()) {
+    for(const auto &entry : fs::directory_iterator(path)) {
+      if(entry.is_regular_file(ec)) {
+        ret.push_back(entry.path());
+      }
+    }
+  }
+  else {
+    for(const auto &entry : fs::directory_iterator(path)) {
+      auto file = entry.path();
+      if(entry.is_regular_file(ec) && extension == file.extension().string()) {
+        ret.push_back(std::move(file));
+      }
+    }
   }
 
   return ret;
@@ -147,8 +206,8 @@ std::vector<fs::path> list_files(std::string_view path)
 int run_create(const Args &args)
 {
   std::error_code ec;
-  if(!fs::is_directory(args.patches, ec)) {
-    std::cout << "Patches does not exist as a directory [" << args.patches << "]\n";
+  if(!fs::is_directory(args.patches_folder, ec)) {
+    std::cout << "Patches folder does not exist as a directory [" << args.patches_folder << "]\n";
     return ERROR_PATH_NOT_FOUND;
   }
 
@@ -182,7 +241,7 @@ int run_create(const Args &args)
       continue;
     }
 
-    std::format_to(std::back_inserter(patch_file_path), "{}\\{}.patch", args.patches, src.filename().stem().string());
+    std::format_to(std::back_inserter(patch_file_path), "{}\\{}{}", args.patches_folder, src.filename().stem().string(), args.patch_file_extension);
 
     if(fs::exists(patch_file_path, ec)) {
       std::cout << "\tPatch file [" << patch_file_path << "] already exists - skipping\n";
@@ -228,9 +287,9 @@ int run_apply(const Args &args)
     return ERROR_FILE_NOT_FOUND;
   }
 
-  const auto patch_files = list_files(args.patches);
+  const auto patch_files = list_files(args.patches_folder, args.patch_file_extension);
   if(patch_files.empty()) {
-    std::cout << "Patches folder [" << args.target << "] is empty or does not exists\n";
+    std::cout << "Patches folder [" << args.patches_folder << "] is empty or does not exists\n";
     return ERROR_FILE_NOT_FOUND;
   }
 
