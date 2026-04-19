@@ -5,7 +5,7 @@ Calculates and applies delta patches using windows's [MSDelta API](https://learn
 ```
 Creates delta diffs between name matching files in two folders.
 General usage:
-        ns_delta_patches <command> -s <source> -t <target> -p <patches>
+        ms_delta <command> -s <source> -t <target> -p <patches>
 
         <command> - create/apply
         -s,--source    - source catalog path REQUIRED
