@@ -49,16 +49,6 @@ struct Args
   std::string source, target, patches_folder, patch_file_extension { DEFAULT_PATCH_EXTENSION };
 };
 
-struct StdStringClearGuard
-{
-  std::string &str;
-  StdStringClearGuard(std::string &str_)
-    : str{str_}
-  {}
-
-  ~StdStringClearGuard() { str.clear(); }
-};
-
 namespace {
 
 void usage()
