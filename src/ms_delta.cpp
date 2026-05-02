@@ -35,6 +35,9 @@
 #include <msdelta.h>
 
 namespace fs = std::filesystem;
+
+static constexpr std::string_view DEFAULT_PATCH_EXTENSION = ".patch";
+
 struct Args
 {
   enum class Command
@@ -43,7 +46,7 @@ struct Args
     Apply
   } cmd;
 
-  std::string source, target, patches_folder, patch_file_extension;
+  std::string source, target, patches_folder, patch_file_extension { DEFAULT_PATCH_EXTENSION };
 };
 
 struct StdStringClearGuard
@@ -57,8 +60,6 @@ struct StdStringClearGuard
 };
 
 namespace {
-
-static constexpr std::string_view DEFAULT_PATCH_EXTENSION = ".patch";
 
 void usage()
 {
@@ -203,6 +204,66 @@ std::vector<fs::path> list_files(std::string_view path, std::string_view extensi
   return ret;
 }
 
+std::optional<fs::path> find_target(const fs::path &src_file, const Args &args)
+{
+  fs::path ret_target(std::format("{}\\{}", args.target, src_file.filename().string()));
+  std::error_code ec;
+  if(!fs::exists(ret_target, ec))
+    return std::nullopt;
+
+  return ret_target;
+};
+
+std::optional<fs::path> find_patch(const fs::path &src_file, const Args &args)
+{
+  fs::path ret_patch(format("{}\\{}", args.patches_folder, src_file.filename().string()));
+  ret_patch.replace_extension(args.patch_file_extension);
+
+  std::error_code ec;
+  if(!fs::exists(ret_patch, ec))
+    return std::nullopt;
+
+  return ret_patch;
+};
+
+void run_create(const fs::path &src_file, const Args &args)
+{
+  const auto patch_file_path = std::format("{}\\{}{}", args.patches_folder, src_file.filename().stem().string(), args.patch_file_extension);
+
+  std::error_code ec;
+  if(fs::exists(patch_file_path, ec)) {
+    std::cout << "\tPatch file [" << patch_file_path << "] already exists - skipping\n";
+    return;
+  }
+
+  const auto target = find_target(src_file, args);
+  if(!target) {
+    std::cout << "\tNo mathing target for " << src_file.filename() << " - skipping.\n";
+    return;
+  }
+
+  std::cout << "\tRunning delta for " << src_file.filename() << " saving to [" << patch_file_path << "]\n";
+
+  const BOOL ok = CreateDeltaA(
+    DELTA_FILE_TYPE_SET_RAW_ONLY,
+    DELTA_FLAG_IGNORE_FILE_SIZE_LIMIT,
+    DELTA_FLAG_NONE,
+    src_file.string().c_str(),
+    target->string().c_str(),
+    nullptr,
+    nullptr,
+    DELTA_INPUT{0},
+    nullptr,
+    CALG_MD5,
+    patch_file_path.c_str()
+  );
+
+  if(!ok) {
+    const auto error_code = ::GetLastError();
+    std::cout << "\t  Failed with error code [" <<  error_code << " - " << Win32ErrStr(error_code) << "]\n";
+  }
+}
+
 int run_create(const Args &args)
 {
   std::error_code ec;
@@ -217,60 +278,42 @@ int run_create(const Args &args)
     return ERROR_FILE_NOT_FOUND;
   }
 
-  const auto target_files = list_files(args.target);
-  if(target_files.empty()) {
-    std::cout << "Target folder [" << args.target << "] is empty or does not exists\n";
-    return ERROR_FILE_NOT_FOUND;
-  }
-
-  const auto find_target = [&target_files](const fs::path &p) -> std::optional<fs::path> {
-    auto found = std::find_if(target_files.begin(), target_files.end(), [&p](const auto &e) { return p.filename() == e.filename(); }); 
-    if(found == target_files.end())
-      return std::nullopt;
-
-    return *found;
-  };
-
-  std::string patch_file_path;
   for(const fs::path &src : source_files) {
-    StdStringClearGuard str_clear(patch_file_path);
-
-    const auto target = find_target(src);
-    if(!target) {
-      std::cout << "\tNo mathing target for " << src.filename() << " - skipping.\n";
-      continue;
-    }
-
-    std::format_to(std::back_inserter(patch_file_path), "{}\\{}{}", args.patches_folder, src.filename().stem().string(), args.patch_file_extension);
-
-    if(fs::exists(patch_file_path, ec)) {
-      std::cout << "\tPatch file [" << patch_file_path << "] already exists - skipping\n";
-      continue;
-    }
-
-    std::cout << "\tRunning delta for " << src.filename() << " saving to [" << patch_file_path << "]\n";
-
-    const BOOL ok = CreateDeltaA(
-      DELTA_FILE_TYPE_SET_RAW_ONLY,
-      DELTA_FLAG_IGNORE_FILE_SIZE_LIMIT,
-      DELTA_FLAG_NONE,
-      src.string().c_str(),
-      target->string().c_str(),
-      nullptr,
-      nullptr,
-      DELTA_INPUT{0},
-      nullptr,
-      CALG_MD5,
-      patch_file_path.c_str()
-    );
-
-    if(!ok) {
-      const auto error_code = ::GetLastError();
-      std::cout << "\t  Failed with error code [" <<  error_code << " - " << Win32ErrStr(error_code) << "]\n";
-    }
+    run_create(src, args);
   }
 
   return 0;
+}
+
+void run_apply(const fs::path &src_file, const Args &args)
+{
+  const auto target_file_path = std::format("{}\\{}", args.target, src_file.filename().string());
+
+  std::error_code ec;
+  if(fs::exists(target_file_path, ec)) {
+    std::cout << "\tTarget file [" << target_file_path << "] alread exists - skipping\n";
+    return;
+  }
+
+  const auto patch_file = find_patch(src_file, args);
+  if(!patch_file) {
+    std::cout << "\tNo patch for " << src_file << "- skipping.\n";
+    return;
+  }
+
+  std::cout << "\tRunning apply delta for " << src_file.filename() << " saving to [" << target_file_path << "]\n";
+
+  const BOOL ok = ApplyDeltaA(
+    DELTA_FLAG_IGNORE_FILE_SIZE_LIMIT,
+    src_file.string().c_str(),
+    patch_file->string().c_str(),
+    target_file_path.c_str()
+  );
+
+  if(!ok) {
+    const auto error_code = ::GetLastError();
+    std::cout << "\t  Failed for source [" << src_file.filename() << "] error code [" <<  error_code << " - " << Win32ErrStr(error_code) << "]\n";
+  }
 }
 
 int run_apply(const Args &args)
@@ -287,50 +330,8 @@ int run_apply(const Args &args)
     return ERROR_FILE_NOT_FOUND;
   }
 
-  const auto patch_files = list_files(args.patches_folder, args.patch_file_extension);
-  if(patch_files.empty()) {
-    std::cout << "Patches folder [" << args.patches_folder << "] is empty or does not exists\n";
-    return ERROR_FILE_NOT_FOUND;
-  }
-
-  const auto find_patch = [&patch_files](const fs::path &file) -> std::optional<fs::path> {
-    auto found = std::find_if(patch_files.begin(), patch_files.end(), [&file](const auto &patch) { return file.filename().stem() == patch.filename().stem(); });
-    if(found == patch_files.end())
-      return std::nullopt;
-
-    return *found;
-  };
-
-  std::string target_file_path;
   for(const fs::path &src : source_files) {
-    StdStringClearGuard str_clear(target_file_path);
-
-    const auto patch_file = find_patch(src);
-    if(!patch_file) {
-      std::cout << "\tNo patch for " << src << "- skipping.\n";
-      continue;
-    }
-
-    std::format_to(std::back_inserter(target_file_path), "{}\\{}", args.target, src.filename().string());
-    
-    if(fs::exists(target_file_path, ec)) {
-      std::cout << "\tTarget file [" << target_file_path << "] alread exists - skipping\n";
-      continue;
-    }
-
-    std::cout << "\tRunning apply delta for " << src.filename() << " saving to [" << target_file_path << "]\n";
-
-    const BOOL ok = ApplyDeltaA(
-      DELTA_FLAG_IGNORE_FILE_SIZE_LIMIT,
-      src.string().c_str(),
-      patch_file->string().c_str(),
-      target_file_path.c_str()
-    );
-
-    if(!ok) {
-      const auto error_code = ::GetLastError();
-      std::cout << "\t  Failed with error code [" <<  error_code << " - " << Win32ErrStr(error_code) << "]\n";
-    }
+    run_apply(src, args);
   }
 
   return 0;
