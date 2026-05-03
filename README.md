@@ -12,6 +12,7 @@ General usage:
         -t,--target    - target catalog path REQUIRED
         -p,--patches   - patches catalog path REQUIRED
         -e,--extension - patches file extension, ".patch" by default OPTIONAL
+        -mt            - threading - how many files will be processed in parallel OPTIONAL
 Example create:
         ms_delta create -s "C:\source_data" -t "C:\target_data" -p "C:\patches"
 

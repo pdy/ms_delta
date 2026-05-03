@@ -22,9 +22,16 @@
 *   SOFTWARE.
 */
 
+#include <atomic>
+#include <cstddef>
+#include <functional>
+#include <mutex>
+#include <new>
 #include <optional>
 #include <filesystem>
 #include <string>
+#include <syncstream>
+#include <thread>
 #include <vector>
 #include <iostream>
 
@@ -38,6 +45,47 @@ namespace fs = std::filesystem;
 
 static constexpr std::string_view DEFAULT_PATCH_EXTENSION = ".patch";
 
+namespace {
+
+template<typename T, typename ...Types>
+struct OneOfTypes
+{
+  static constexpr bool value = (std::is_same_v<T, Types> || ...);
+};
+
+template<typename T>
+concept Integers = OneOfTypes<T, int, size_t, long, unsigned>::value;
+
+template<Integers T>
+std::optional<T> string_to_type(std::string_view str)
+{
+  if (str.empty())
+    return std::nullopt;
+
+  if (str.size() == 1)
+    if (str[0] == '.' || str[0] == ',')
+      return std::nullopt;
+
+  T result = {};
+  const char* last = str.data() + str.size();
+  if (auto [p, ec] = std::from_chars(str.data(), last, result); p == last)
+  {
+    return result;
+  }
+  else if (*p == '.' || *p == ',')
+  {
+    T temp;
+    if (auto [l, err] = std::from_chars(++p, last, temp); l == last)
+      return result;
+  }
+
+  return std::nullopt;
+}
+
+}
+
+using thread_count_t = std::invoke_result_t<decltype(std::thread::hardware_concurrency)>;
+
 struct Args
 {
   enum class Command
@@ -47,6 +95,81 @@ struct Args
   } cmd;
 
   std::string source, target, patches_folder, patch_file_extension { DEFAULT_PATCH_EXTENSION };
+  thread_count_t thread_count {0};
+};
+
+class alignas(std::hardware_constructive_interference_size)
+ThreadPool final
+{
+  // data
+  std::vector<fs::path> m_source_files;
+  Args m_args;
+  std::size_t m_avail_idx = 0;
+
+  // state for threading
+  std::mutex m_source_files_mutex = {};
+  std::atomic_bool m_running { false };
+  std::unique_ptr<std::jthread[]> m_threads = {};
+
+  // callback
+  std::function<void(const fs::path&, const Args&)> m_action;
+
+public:
+
+  ThreadPool(std::vector<fs::path> source_files, Args args, std::function<void(const fs::path&, const Args&)> action)
+    : m_source_files{std::move(source_files)}, m_args{std::move(args)}, m_action{std::move(action)}
+  {
+  }
+
+  void start()
+  {
+    if(m_source_files.empty())
+      return;
+
+    m_running = true;
+    m_threads = std::make_unique<std::jthread[]>(m_args.thread_count);
+    for(thread_count_t i = 0; i < m_args.thread_count; ++i)
+    {
+      m_threads[i] = std::jthread([this, w = &ThreadPool::worker]{ std::invoke(w, this); });
+    }
+  }
+
+  void join()
+  {
+    for(thread_count_t i = 0; i < m_args.thread_count; ++i)
+    {
+      if(m_threads[i].joinable())
+        m_threads[i].join();
+    }
+  }
+
+private:
+
+  void worker()
+  {
+    while(m_running)
+    {
+      fs::path source_path;
+      {
+        std::lock_guard lock(m_source_files_mutex);
+
+        if(!m_running)
+          break;
+
+        if(m_avail_idx >= m_source_files.size())
+        {
+          m_avail_idx = 0;
+          m_running = false;
+          break;
+        }
+
+        source_path = m_source_files[m_avail_idx];
+        ++m_avail_idx;
+      }
+
+      m_action(source_path, m_args);
+    }
+  }
 };
 
 namespace {
@@ -62,6 +185,7 @@ void usage()
     "\t-t,--target    - target catalog path REQUIRED\n"
     "\t-p,--patches   - patches catalog path REQUIRED\n"
     "\t-e,--extension - patches file extension, \"" << DEFAULT_PATCH_EXTENSION << "\" by default OPTIONAL\n"
+    "\t-mt            - threading - how many files will be processed in parallel OPTIONAL\n"
     "Example create:\n"
     "\tms_delta create -s \"C:\\source_data\" -t \"C:\\target_data\" -p \"C:\\patches\"\n\n"
     "Example apply:\n"
@@ -107,6 +231,14 @@ std::optional<Args> process_args(int argc, char *argv[])
       ret.patches_folder = argv[++i];
     else if(one_of(arg, "-e", "--extension") && i + 1 < argc)
       ret.patch_file_extension = argv[++i];
+    else if(one_of(arg, "-mt") && i + 1 < argc) {
+      auto thread_count = string_to_type<size_t>(argv[++i]);
+      if(!thread_count) {
+        std::cout << "Incorrect value for \"-mt\" argument\n";
+        return std::nullopt;
+      }
+      ret.thread_count = static_cast<thread_count_t>(*thread_count);
+    }
   }
 
   bool ok = true;
@@ -130,7 +262,7 @@ std::optional<Args> process_args(int argc, char *argv[])
   else if(!ret.patch_file_extension.starts_with('.'))
     ret.patch_file_extension = std::format(".{}", ret.patch_file_extension);
 
-  std::cout << "source: [" << ret.source << "] target: [" << ret.target << "] patches: " << ret.patches_folder << " extension: [" << ret.patch_file_extension << "]\n";
+  std::cout << "\nsource [" << ret.source << "] target [" << ret.target << "] patches [" << ret.patches_folder << "] extension [" << ret.patch_file_extension << "] thread count [" << ret.thread_count << "]\n\n";
 
   if(!ok)
     return std::nullopt;
@@ -216,23 +348,24 @@ std::optional<fs::path> find_patch(const fs::path &src_file, const Args &args)
   return ret_patch;
 };
 
-void run_create(const fs::path &src_file, const Args &args)
+void create_delta(const fs::path &src_file, const Args &args)
 {
-  const auto patch_file_path = std::format("{}\\{}{}", args.patches_folder, src_file.filename().stem().string(), args.patch_file_extension);
+  std::osyncstream out(std::cout);
 
+  const auto patch_file_path = std::format("{}\\{}{}", args.patches_folder, src_file.filename().stem().string(), args.patch_file_extension);
   std::error_code ec;
   if(fs::exists(patch_file_path, ec)) {
-    std::cout << "\tPatch file [" << patch_file_path << "] already exists - skipping\n";
+    out << "\tPatch file [" << patch_file_path << "] already exists - skipping\n";
     return;
   }
 
   const auto target = find_target(src_file, args);
   if(!target) {
-    std::cout << "\tNo mathing target for " << src_file.filename() << " - skipping.\n";
+    out << "\tNo mathing target for " << src_file.filename() << " - skipping.\n";
     return;
   }
 
-  std::cout << "\tRunning delta for " << src_file.filename() << " saving to [" << patch_file_path << "]\n";
+  out << "\tRunning delta for " << src_file.filename() << " saving to [" << patch_file_path << "]\n";
 
   const BOOL ok = CreateDeltaA(
     DELTA_FILE_TYPE_SET_RAW_ONLY,
@@ -250,11 +383,11 @@ void run_create(const fs::path &src_file, const Args &args)
 
   if(!ok) {
     const auto error_code = ::GetLastError();
-    std::cout << "\t  Failed with error code [" <<  error_code << " - " << Win32ErrStr(error_code) << "]\n";
+    out << "\t  Failed with error code [" <<  error_code << " - " << Win32ErrStr(error_code) << "]\n";
   }
 }
 
-int run_create(const Args &args)
+int run_create(Args args)
 {
   std::error_code ec;
   if(!fs::is_directory(args.patches_folder, ec)) {
@@ -268,30 +401,38 @@ int run_create(const Args &args)
     return ERROR_FILE_NOT_FOUND;
   }
 
-  for(const fs::path &src : source_files) {
-    run_create(src, args);
+  if(args.thread_count <= 1) {
+    for(const fs::path &src : source_files) {
+      create_delta(src, args);
+    }
+  }
+  else {
+    ThreadPool pool(std::move(source_files), std::move(args), create_delta);
+    pool.start();
+    pool.join();
   }
 
   return 0;
 }
 
-void run_apply(const fs::path &src_file, const Args &args)
+void apply_delta(const fs::path &src_file, const Args &args)
 {
-  const auto target_file_path = std::format("{}\\{}", args.target, src_file.filename().string());
+  std::osyncstream out(std::cout);
 
+  const auto target_file_path = std::format("{}\\{}", args.target, src_file.filename().string());
   std::error_code ec;
   if(fs::exists(target_file_path, ec)) {
-    std::cout << "\tTarget file [" << target_file_path << "] alread exists - skipping\n";
+    out << "\tTarget file [" << target_file_path << "] alread exists - skipping\n";
     return;
   }
 
   const auto patch_file = find_patch(src_file, args);
   if(!patch_file) {
-    std::cout << "\tNo patch for " << src_file << "- skipping.\n";
+    out << "\tNo patch for " << src_file << "- skipping.\n";
     return;
   }
 
-  std::cout << "\tRunning apply delta for " << src_file.filename() << " saving to [" << target_file_path << "]\n";
+  out << "\tRunning apply delta for " << src_file.filename() << " saving to [" << target_file_path << "]\n";
 
   const BOOL ok = ApplyDeltaA(
     DELTA_FLAG_IGNORE_FILE_SIZE_LIMIT,
@@ -302,11 +443,11 @@ void run_apply(const fs::path &src_file, const Args &args)
 
   if(!ok) {
     const auto error_code = ::GetLastError();
-    std::cout << "\t  Failed for source [" << src_file.filename() << "] error code [" <<  error_code << " - " << Win32ErrStr(error_code) << "]\n";
+    out << "\t  Failed for source [" << src_file.filename() << "] error code [" <<  error_code << " - " << Win32ErrStr(error_code) << "]\n";
   }
 }
 
-int run_apply(const Args &args)
+int run_apply(Args args)
 {
   std::error_code ec;
   if(!fs::is_directory(args.target, ec)) {
@@ -320,8 +461,15 @@ int run_apply(const Args &args)
     return ERROR_FILE_NOT_FOUND;
   }
 
-  for(const fs::path &src : source_files) {
-    run_apply(src, args);
+  if(args.thread_count <= 1) {
+    for(const fs::path &src : source_files) {
+      apply_delta(src, args);
+    }
+  }
+  else {
+    ThreadPool pool(std::move(source_files), std::move(args), apply_delta);
+    pool.start();
+    pool.join();
   }
 
   return 0;
@@ -331,17 +479,17 @@ int run_apply(const Args &args)
 
 int main(int argc, char *argv[])
 {
-  const auto args = process_args(argc, argv);
+  auto args = process_args(argc, argv);
   if(!args) {
     usage();
     return ERROR_BAD_ARGUMENTS;
   }
 
   if(args->cmd == Args::Command::Create)
-    return run_create(*args);
+    return run_create(std::move(args).value());
 
   if(args->cmd == Args::Command::Apply)
-    return run_apply(*args);
+    return run_apply(std::move(args).value());
 
   return 0;
 }
