@@ -142,7 +142,7 @@ private:
 
   void worker()
   {
-    thread_local uint32_t id = m_ids++;
+    const uint32_t id = m_ids++;
     while(m_running)
     {
       fs::path source_path;
