@@ -110,13 +110,16 @@ ThreadPool final
   std::mutex m_source_files_mutex = {};
   std::atomic_bool m_running { false };
   std::unique_ptr<std::jthread[]> m_threads = {};
+  std::atomic_uint32_t m_ids{1};
 
   // callback
-  std::function<void(const fs::path&, const Args&)> m_action;
+  std::function<void(const fs::path&, const Args&, std::ostream&)> m_action;
 
 public:
 
-  ThreadPool(std::vector<fs::path> source_files, Args args, std::function<void(const fs::path&, const Args&)> action)
+  using Callback = decltype(m_action);
+
+  ThreadPool(std::vector<fs::path> source_files, Args args, Callback action)
     : m_source_files{std::move(source_files)}, m_args{std::move(args)}, m_action{std::move(action)}
   {
   }
@@ -141,12 +144,16 @@ public:
       if(m_threads[i].joinable())
         m_threads[i].join();
     }
+
+    m_ids = 1;
+    std::osyncstream(std::cout) << "All threads completed\n";
   }
 
 private:
 
   void worker()
   {
+    thread_local uint32_t id = m_ids++;
     while(m_running)
     {
       fs::path source_path;
@@ -165,10 +172,15 @@ private:
 
         source_path = m_source_files[m_avail_idx];
         ++m_avail_idx;
+
+        std::osyncstream(std::cout) << "Thread [" << id << "] " << source_path.filename() << '\n';
       }
 
-      m_action(source_path, m_args);
+      std::osyncstream out(std::cout);
+      m_action(source_path, m_args, out);
     }
+
+    std::osyncstream(std::cout) << "Thread [" << id << "] joined\n";
   }
 };
 
@@ -348,10 +360,8 @@ std::optional<fs::path> find_patch(const fs::path &src_file, const Args &args)
   return ret_patch;
 };
 
-void create_delta(const fs::path &src_file, const Args &args)
+void create_delta(const fs::path &src_file, const Args &args, std::ostream &out)
 {
-  std::osyncstream out(std::cout);
-
   const auto patch_file_path = std::format("{}\\{}{}", args.patches_folder, src_file.filename().stem().string(), args.patch_file_extension);
   std::error_code ec;
   if(fs::exists(patch_file_path, ec)) {
@@ -365,7 +375,10 @@ void create_delta(const fs::path &src_file, const Args &args)
     return;
   }
 
-  out << "\tRunning delta for " << src_file.filename() << " saving to [" << patch_file_path << "]\n";
+  {
+    std::osyncstream(std::cout) <<
+      "\tRunning delta for " << src_file.filename() << " saving to [" << patch_file_path << "]\n";
+  }
 
   const BOOL ok = CreateDeltaA(
     DELTA_FILE_TYPE_SET_RAW_ONLY,
@@ -383,7 +396,7 @@ void create_delta(const fs::path &src_file, const Args &args)
 
   if(!ok) {
     const auto error_code = ::GetLastError();
-    out << "\t  Failed with error code [" <<  error_code << " - " << Win32ErrStr(error_code) << "]\n";
+    out << "\t  \""<< src_file.filename() << "\" failed with error code [" <<  error_code << " - " << Win32ErrStr(error_code) << "]\n";
   }
 }
 
@@ -403,7 +416,7 @@ int run_create(Args args)
 
   if(args.thread_count <= 1) {
     for(const fs::path &src : source_files) {
-      create_delta(src, args);
+      create_delta(src, args, std::cout);
     }
   }
   else {
@@ -415,10 +428,8 @@ int run_create(Args args)
   return 0;
 }
 
-void apply_delta(const fs::path &src_file, const Args &args)
+void apply_delta(const fs::path &src_file, const Args &args, std::ostream &out)
 {
-  std::osyncstream out(std::cout);
-
   const auto target_file_path = std::format("{}\\{}", args.target, src_file.filename().string());
   std::error_code ec;
   if(fs::exists(target_file_path, ec)) {
@@ -432,7 +443,10 @@ void apply_delta(const fs::path &src_file, const Args &args)
     return;
   }
 
-  out << "\tRunning apply delta for " << src_file.filename() << " saving to [" << target_file_path << "]\n";
+  {
+    std::osyncstream(std::cout) <<
+      "\tRunning apply delta for " << src_file.filename() << " saving to [" << target_file_path << "]\n";
+  }
 
   const BOOL ok = ApplyDeltaA(
     DELTA_FLAG_IGNORE_FILE_SIZE_LIMIT,
@@ -463,7 +477,7 @@ int run_apply(Args args)
 
   if(args.thread_count <= 1) {
     for(const fs::path &src : source_files) {
-      apply_delta(src, args);
+      apply_delta(src, args, std::cout);
     }
   }
   else {
