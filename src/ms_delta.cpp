@@ -47,37 +47,26 @@ static constexpr std::string_view DEFAULT_PATCH_EXTENSION = ".patch";
 
 namespace {
 
-template<typename T, typename ...Types>
-struct OneOfTypes
-{
-  static constexpr bool value = (std::is_same_v<T, Types> || ...);
+template<typename T>
+concept FromCharsAccepted = requires(T val) {
+  std::from_chars("", "", val);
 };
 
 template<typename T>
-concept Integers = OneOfTypes<T, int, size_t, long, unsigned>::value;
+concept Str2TypeAccepted = FromCharsAccepted<T> && std::integral<T>;
 
-template<Integers T>
+template<Str2TypeAccepted T>
 std::optional<T> string_to_type(std::string_view str)
 {
   if (str.empty())
     return std::nullopt;
 
-  if (str.size() == 1)
-    if (str[0] == '.' || str[0] == ',')
-      return std::nullopt;
-
   T result = {};
   const char* last = str.data() + str.size();
-  if (auto [p, ec] = std::from_chars(str.data(), last, result); p == last)
-  {
+  auto [p, ec] = std::from_chars(str.data(), last, result);
+
+  if (ec == std::errc() && p == last)
     return result;
-  }
-  else if (*p == '.' || *p == ',')
-  {
-    T temp;
-    if (auto [l, err] = std::from_chars(++p, last, temp); l == last)
-      return result;
-  }
 
   return std::nullopt;
 }
@@ -191,7 +180,7 @@ void usage()
   std::cout << 
     "\nCreates delta diffs between name matching files in two folders."
     "\nGeneral usage:\n"
-    "\tns_delta_patches <command> -s <source> -t <target> -p <patches>\n\n"
+    "\tms_delta <command> -s <source> -t <target> -p <patches>\n\n"
     "\t<command> - create/apply\n"
     "\t-s,--source    - source catalog path REQUIRED\n"
     "\t-t,--target    - target catalog path REQUIRED\n"
